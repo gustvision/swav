@@ -81,7 +81,9 @@ def initialize_exp(params, *args, dump_params=True):
 
     # dump parameters
     if dump_params:
-        pickle.dump(params, open(os.path.join(params.dump_path, "params.pkl"), "wb"))
+        pickle.dump(
+            params, open(os.path.join(params.dump_path, "params.pkl"), "wb")
+        )
 
     # create repo to store checkpoints
     params.dump_checkpoints = os.path.join(params.dump_path, "checkpoints")
@@ -90,7 +92,8 @@ def initialize_exp(params, *args, dump_params=True):
 
     # create a panda object to log loss and acc
     training_stats = PD_Stats(
-        os.path.join(params.dump_path, "stats" + str(params.rank) + ".pkl"), args
+        os.path.join(params.dump_path, "stats" + str(params.rank) + ".pkl"),
+        args,
     )
 
     # create a logger
@@ -99,7 +102,10 @@ def initialize_exp(params, *args, dump_params=True):
     )
     logger.info("============ Initialized logger ============")
     logger.info(
-        "\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(params)).items()))
+        "\n".join(
+            "%s: %s" % (k, str(v))
+            for k, v in sorted(dict(vars(params)).items())
+        )
     )
     logger.info("The experiment will be stored in %s\n" % params.dump_path)
     logger.info("")
@@ -125,7 +131,9 @@ def restart_from_checkpoint(ckp_paths, run_variables=None, **kwargs):
 
     # open checkpoint file
     checkpoint = torch.load(
-        ckp_path, map_location="cuda:" + str(torch.distributed.get_rank() % torch.cuda.device_count())
+        ckp_path,
+        map_location="cuda:"
+        + str(torch.distributed.get_rank() % torch.cuda.device_count()),
     )
 
     # key is what to look for in the checkpoint file
@@ -138,10 +146,14 @@ def restart_from_checkpoint(ckp_paths, run_variables=None, **kwargs):
                 print(msg)
             except TypeError:
                 msg = value.load_state_dict(checkpoint[key])
-            logger.info("=> loaded {} from checkpoint '{}'".format(key, ckp_path))
+            logger.info(
+                "=> loaded {} from checkpoint '{}'".format(key, ckp_path)
+            )
         else:
             logger.warning(
-                "=> failed to load {} from checkpoint '{}'".format(key, ckp_path)
+                "=> failed to load {} from checkpoint '{}'".format(
+                    key, ckp_path
+                )
             )
 
     # re load variable important for the run

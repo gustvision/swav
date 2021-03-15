@@ -25,7 +25,9 @@ def resnet50(pretrained=True, **kwargs):
             map_location="cpu",
         )
         # removes "module."
-        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        state_dict = {
+            k.replace("module.", ""): v for k, v in state_dict.items()
+        }
         # load weights
         model.load_state_dict(state_dict, strict=False)
     return model
