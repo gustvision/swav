@@ -1,3 +1,5 @@
+from ahai.data.sequence import get_sequence_dataset
+from ahai.nce.model import NCENet
 # Copyright (c) Facebook, Inc. and its affiliates.
 # All rights reserved.
 #
@@ -78,6 +80,18 @@ parser.add_argument(
     type=bool_flag,
     default=True,
     help="""use PIL library to perform blur instead of opencv""",
+)
+parser.add_argument(
+    "--split_jsons_path",
+    type=str,
+    default="/home/liam/ahai-lolwr/data/split/big",
+    help="(from powder/autohighlights-ai) - dataset trainval split",
+)
+parser.add_argument(
+    "--seq_len_multiplier",
+    type=int,
+    default=1,
+    help="(from powder/autohighlights-ai) - multiply the seq len",
 )
 
 #########################
@@ -254,14 +268,21 @@ def main():
     logger, training_stats = initialize_exp(args, "epoch", "loss")
 
     # build data
-    train_dataset = MultiCropDataset(
-        args.data_path,
-        args.size_crops,
-        args.nmb_crops,
-        args.min_scale_crops,
-        args.max_scale_crops,
-        pil_blur=args.use_pil_blur,
+    # train_dataset = MultiCropDataset(
+    #     args.data_path,
+    #     args.size_crops,
+    #     args.nmb_crops,
+    #     args.min_scale_crops,
+    #     args.max_scale_crops,
+    #     pil_blur=args.use_pil_blur,
+    # )
+    train_dataset = get_sequence_dataset(
+        "train",
+        os.path.join(args.data_path, "big"),
+        args.split_jsons_path,
+        seq_len_multiplier=args.seq_len_multiplier,
     )
+    # train_dataset = torch.utils.data.Subset(train_dataset, np.arange(0, len(train_dataset), 100))
     sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
@@ -276,12 +297,19 @@ def main():
     )
 
     # build model
-    model = resnet_models.__dict__[args.arch](
+    model = WrapNCE(
         normalize=True,
         hidden_mlp=args.hidden_mlp,
         output_dim=args.feat_dim,
         nmb_prototypes=args.nmb_prototypes,
+        seq_len_multiplier=args.seq_len_multiplier,
     )
+    # model = resnet_models.__dict__[args.arch](
+    #     normalize=True,
+    #     hidden_mlp=args.hidden_mlp,
+    #     output_dim=args.feat_dim,
+    #     nmb_prototypes=args.nmb_prototypes,
+    # )
     # synchronize batch norm layers
     if args.sync_bn == "pytorch":
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -414,6 +442,39 @@ def main():
             torch.save({"queue": queue}, queue_path)
 
 
+class WrapNCE(nn.Module):
+    def __init__(self, normalize=True, output_dim=0, nmb_prototypes=0, seq_len_multiplier=None, **kwargs):
+        super().__init__()
+        assert seq_len_multiplier
+        self.seq_len_multiplier = seq_len_multiplier
+        self.output_dim = output_dim
+        self.l2norm = normalize
+        self.ncenet = NCENet(fts_dim_lo=output_dim, shuffled_features_detection_enabled=False)
+        self.prototypes = nn.Linear(output_dim, nmb_prototypes, bias=False)
+
+    def forward(self, x):
+        B, S, C, H, W = x.shape
+        x = x.view(
+            B * self.seq_len_multiplier,
+            S // self.seq_len_multiplier,
+            C,
+            H,
+            W,
+        )
+        pred_fts_lo_delta_norm, fts_lo, pred_fts_lo, all_fts = self.ncenet(x)
+        fts_lo = fts_lo[:, -1]
+        if self.ncenet.bidirectional:
+            fts_lo, pred_fts_lo = [torch.cat([_[:, :self.output_dim], _[:, self.output_dim:]], 0) for _ in [fts_lo, pred_fts_lo]]
+        x = torch.cat([fts_lo, pred_fts_lo], 0)
+
+        if self.l2norm:
+            x = nn.functional.normalize(x, dim=1, p=2)
+
+        if self.prototypes is not None:
+            return x, self.prototypes(x), pred_fts_lo_delta_norm
+        return x
+
+
 def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -425,6 +486,9 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
 
     end = time.time()
     for it, inputs in enumerate(train_loader):
+        bs = inputs[0].size(0)
+        if len(inputs) == 1:
+            inputs = inputs[0]
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -440,9 +504,15 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
             model.module.prototypes.weight.copy_(w)
 
         # ============ multi-res forward passes ... ============
-        embedding, output = model(inputs)
+
+        # LS: simply just need every i, i+bsz, i+2*bsz... i+n*bsz of
+        # output and embedding to correspond to different views of the
+        # same thing, for i=0 to bsz - 1, n=args.crops_for_assign
+        # output is post-applying prototypes matrix
+        # embedding is pre-prototypes linear transform
+
+        embedding, output, delta = model(inputs)
         embedding = embedding.detach()
-        bs = inputs[0].size(0)
 
         # ============ swav loss ... ============
         loss = 0
@@ -509,13 +579,15 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
                 "Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
                 "Data {data_time.val:.3f} ({data_time.avg:.3f})\t"
                 "Loss {loss.val:.4f} ({loss.avg:.4f})\t"
-                "Lr: {lr:.4f}".format(
+                "Lr: {lr:.4f}\t"
+                "Del: {delta:.4f}".format(
                     epoch,
                     it,
                     batch_time=batch_time,
                     data_time=data_time,
                     loss=losses,
                     lr=optimizer.optim.param_groups[0]["lr"],
+                    delta=delta.item(),
                 )
             )
     return (epoch, losses.avg), queue
