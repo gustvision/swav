@@ -1,5 +1,6 @@
 from ahai.data.sequence import get_sequence_dataset
 from ahai.nce.model import NCENet
+
 # Copyright (c) Facebook, Inc. and its affiliates.
 # All rights reserved.
 #
@@ -443,28 +444,38 @@ def main():
 
 
 class WrapNCE(nn.Module):
-    def __init__(self, normalize=True, output_dim=0, nmb_prototypes=0, seq_len_multiplier=None, **kwargs):
+    def __init__(
+        self,
+        normalize=True,
+        output_dim=0,
+        nmb_prototypes=0,
+        seq_len_multiplier=None,
+        **kwargs
+    ):
         super().__init__()
         assert seq_len_multiplier
         self.seq_len_multiplier = seq_len_multiplier
         self.output_dim = output_dim
         self.l2norm = normalize
-        self.ncenet = NCENet(fts_dim_lo=output_dim, shuffled_features_detection_enabled=False)
+        self.ncenet = NCENet(
+            fts_dim_lo=output_dim, shuffled_features_detection_enabled=False
+        )
         self.prototypes = nn.Linear(output_dim, nmb_prototypes, bias=False)
 
     def forward(self, x):
         B, S, C, H, W = x.shape
         x = x.view(
-            B * self.seq_len_multiplier,
-            S // self.seq_len_multiplier,
-            C,
-            H,
-            W,
+            B * self.seq_len_multiplier, S // self.seq_len_multiplier, C, H, W,
         )
         pred_fts_lo_delta_norm, fts_lo, pred_fts_lo, all_fts = self.ncenet(x)
         fts_lo = fts_lo[:, -1]
         if self.ncenet.bidirectional:
-            fts_lo, pred_fts_lo = [torch.cat([_[:, :self.output_dim], _[:, self.output_dim:]], 0) for _ in [fts_lo, pred_fts_lo]]
+            fts_lo, pred_fts_lo = [
+                torch.cat(
+                    [_[:, : self.output_dim], _[:, self.output_dim :]], 0
+                )
+                for _ in [fts_lo, pred_fts_lo]
+            ]
         x = torch.cat([fts_lo, pred_fts_lo], 0)
 
         if self.l2norm:
