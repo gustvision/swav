@@ -478,7 +478,7 @@ class WrapNCE(nn.Module):
             B * self.seq_len_multiplier, S // self.seq_len_multiplier, C, H, W,
         )
         pred_fts_lo_delta_norm, fts_lo, pred_fts_lo, all_fts = self.ncenet(x)
-        fts_lo_unused = fts_lo[:, :-1].view(-1, fts_lo.shape[-1])
+        fts_lo_unused = fts_lo[:, :-1].reshape(-1, fts_lo.shape[-1])
         fts_lo = fts_lo[:, -1]
         if self.ncenet.bidirectional:
             # From [B, d * 2] to [B * 2, d]
