@@ -94,6 +94,12 @@ parser.add_argument(
     default=1,
     help="(from powder/autohighlights-ai) - multiply the seq len",
 )
+parser.add_argument(
+    "--bidirectional",
+    type=lambda x: bool(int(x)),
+    default="1",
+    help="(from powder/autohighlights-ai) - whether to use bidirectional RNN",
+)
 
 #########################
 ## swav specific params #
@@ -233,7 +239,7 @@ parser.add_argument(
 parser.add_argument(
     "--checkpoint_freq",
     type=int,
-    default=25,
+    default=5,
     help="Save the model periodically",
 )
 parser.add_argument(
@@ -304,6 +310,7 @@ def main():
         output_dim=args.feat_dim,
         nmb_prototypes=args.nmb_prototypes,
         seq_len_multiplier=args.seq_len_multiplier,
+        bidirectional=args.bidirectional,
     )
     # model = resnet_models.__dict__[args.arch](
     #     normalize=True,
@@ -450,6 +457,7 @@ class WrapNCE(nn.Module):
         output_dim=0,
         nmb_prototypes=0,
         seq_len_multiplier=None,
+        bidirectional=True,
         **kwargs
     ):
         super().__init__()
@@ -458,7 +466,9 @@ class WrapNCE(nn.Module):
         self.output_dim = output_dim
         self.l2norm = normalize
         self.ncenet = NCENet(
-            fts_dim_lo=output_dim, shuffled_features_detection_enabled=False
+            bidirectional=bidirectional,
+            fts_dim_lo=output_dim,
+            shuffled_features_detection_enabled=False,
         )
         self.prototypes = nn.Linear(output_dim, nmb_prototypes, bias=False)
 
@@ -468,21 +478,26 @@ class WrapNCE(nn.Module):
             B * self.seq_len_multiplier, S // self.seq_len_multiplier, C, H, W,
         )
         pred_fts_lo_delta_norm, fts_lo, pred_fts_lo, all_fts = self.ncenet(x)
+        fts_lo_unused = fts_lo[:, :-1].view(-1, fts_lo.shape[-1])
         fts_lo = fts_lo[:, -1]
         if self.ncenet.bidirectional:
-            fts_lo, pred_fts_lo = [
+            # From [B, d * 2] to [B * 2, d]
+            # I.e. for actual and predicted features
+            # stack the t=0 and t=S
+            fts_lo, pred_fts_lo, fts_lo_unused = [
                 torch.cat(
                     [_[:, : self.output_dim], _[:, self.output_dim :]], 0
                 )
-                for _ in [fts_lo, pred_fts_lo]
+                for _ in [fts_lo, pred_fts_lo, fts_lo_unused]
             ]
+        # Now stack fts and pred fts
         x = torch.cat([fts_lo, pred_fts_lo], 0)
 
         if self.l2norm:
             x = nn.functional.normalize(x, dim=1, p=2)
 
         if self.prototypes is not None:
-            return x, self.prototypes(x), pred_fts_lo_delta_norm
+            return x, self.prototypes(x), pred_fts_lo_delta_norm, fts_lo_unused
         return x
 
 
@@ -500,6 +515,7 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
         bs = inputs[0].size(0)
         if len(inputs) == 1:
             inputs = inputs[0]
+            bs *= args.seq_len_multiplier * (2 if args.bidirectional else 1)
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -522,7 +538,8 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
         # output is post-applying prototypes matrix
         # embedding is pre-prototypes linear transform
 
-        embedding, output, delta = model(inputs)
+        extra_embedding = None
+        embedding, output, delta, extra_embedding = model(inputs)
         embedding = embedding.detach()
 
         # ============ swav loss ... ============
@@ -535,10 +552,15 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
                 if queue is not None:
                     if use_the_queue or not torch.all(queue[i, -1, :] == 0):
                         use_the_queue = True
+                        queue_this = queue[i]
+                        if extra_embedding is not None:
+                            queue_this = torch.cat(
+                                [queue_this, extra_embedding]
+                            )
                         out = torch.cat(
                             (
                                 torch.mm(
-                                    queue[i],
+                                    queue_this,
                                     model.module.prototypes.weight.t(),
                                 ),
                                 out,
@@ -549,6 +571,10 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
                     queue[i, :bs] = embedding[
                         crop_id * bs : (crop_id + 1) * bs
                     ]
+                    if extra_embedding is not None:
+                        l = len(extra_embedding)
+                        queue[i, l:] = queue[i, :-l].clone()
+                        queue[i, :l] = extra_embedding
                 # get assignments
                 q = out / args.epsilon
                 if args.improve_numerical_stability:

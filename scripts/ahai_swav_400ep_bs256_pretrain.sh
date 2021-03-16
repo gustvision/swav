@@ -25,11 +25,11 @@ mkdir -p $EXPERIMENT_PATH
 
 python -m torch.distributed.launch --nproc_per_node=2 main_swav.py \
 --data_path $DATASET_PATH \
---nmb_crops 2 2 \
+--nmb_crops 1 1 \
 --size_crops 224 96 \
 --min_scale_crops 0.14 0.05 \
 --max_scale_crops 1. 0.14 \
---crops_for_assign 0 1 \
+--crops_for_assign 0 \
 --use_pil_blur false \
 --temperature 0.1 \
 --epsilon 0.05 \
